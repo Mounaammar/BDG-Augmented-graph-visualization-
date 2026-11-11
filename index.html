@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>METR-LA augmented graph (G+)</title>
+<title>METR-LA augmented graph (TPGS+)</title>
 <link rel="stylesheet" href="leaflet/leaflet.css">
 <script src="leaflet/leaflet.js"></script>
 <script src="data.js"></script>
@@ -61,10 +61,19 @@ const nodeById = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
 const wMax = Math.max(...DATA.beh.map(b => b.w));
 
 const map = L.map("map", { preferCanvas: true });
-L.tileLayer("https://{s}.basemap.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+// background map: CARTO light, and if its tiles fail (blocked network, ad blocker), switch to OpenStreetMap
+const carto = L.tileLayer("https://{s}.basemap.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
   attribution: '&copy; OpenStreetMap contributors &copy; CARTO', maxZoom: 19
-}).addTo(map).once("tileerror", () => map.attributionControl.addAttribution("background map needs internet"));
-map.fitBounds(DATA.nodes.map(n => [n.lat, n.lon]), { padding: [20, 20] });
+}).addTo(map);
+carto.once("tileerror", () => {
+  map.removeLayer(carto);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: '&copy; OpenStreetMap contributors', maxZoom: 19, opacity: 0.6
+  }).addTo(map).once("tileerror", () => map.attributionControl.addAttribution("background map could not be loaded"));
+});
+const fit = () => { map.invalidateSize(); map.fitBounds(DATA.nodes.map(n => [n.lat, n.lon]), { padding: [20, 20] }); };
+fit();
+window.addEventListener("load", fit);   // fit again once the layout is final
 
 const roadLayer = L.layerGroup().addTo(map);
 const behLayer = L.layerGroup().addTo(map);
