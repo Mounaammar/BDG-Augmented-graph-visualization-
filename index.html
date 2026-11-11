@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>METR-LA augmented graph (G+)</title>
+<link rel="stylesheet" href="leaflet/leaflet.css">
+<script src="leaflet/leaflet.js"></script>
+<script src="data.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: #222; display: flex; height: 100vh; }
+  #side { width: 380px; overflow-y: auto; padding: 16px 18px; border-right: 1px solid #ddd; background: #fafafa; }
+  #map { flex: 1; height: 100vh; min-width: 0; }
+  h1 { font-size: 18px; margin: 0 0 6px; }
+  h2 { font-size: 14px; margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: #555; }
+  p { margin: 4px 0 8px; }
+  .muted { color: #666; font-size: 12.5px; }
+  label { display: block; margin: 3px 0; cursor: pointer; }
+  .sw { display: inline-block; width: 22px; height: 4px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+  input[type=range] { width: 100%; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  td, th { padding: 3px 4px; text-align: left; border-bottom: 1px solid #eee; }
+  th { color: #555; font-weight: 600; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { height: 8px; background: #888; border-radius: 2px; }
+  #detail { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px 12px; margin-top: 8px; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; color: #fff; }
+  details summary { cursor: pointer; color: #333; }
+</style>
+</head>
+<body>
+<div id="side">
+  <h1>METR-LA augmented graph G<sup>+</sup></h1>
+  <p class="muted">METR-LA road graph with the behavioral edges found by BDG.</p>
+  <p class="muted" id="stats"></p>
+
+  <h2>Layers</h2>
+  <label><input type="checkbox" id="showRoad" checked><span class="sw" style="background:#b8b8b8"></span>road</label>
+  <label><input type="checkbox" id="showCons" checked><span class="sw" style="background:#2b6cb0"></span>consistent</label>
+  <label><input type="checkbox" id="showLat" checked><span class="sw" style="background:#dd6b20"></span>latent</label>
+
+  <h2>Filters</h2>
+  <label>Min w: <span id="wv"></span><input type="range" id="wmin" min="0" max="100" value="0"></label>
+  <label>Direction: <select id="lag"><option value="any">any</option><option value="0">lag 0</option>
+    <option value="against">against traffic</option><option value="with">with traffic</option></select></label>
+  <p class="muted">Dot = leader.</p>
+
+  <h2>Selection</h2>
+  <div id="detail"><span class="muted">Click an edge or a sensor.</span></div>
+
+</div>
+<div id="map"></div>
+
+<script>
+window.onerror = (m) => { document.getElementById("map").innerHTML = "<p style='padding:20px;color:#b00'>Error: " + m + "</p>"; };
+if (typeof L === "undefined") throw new Error("Leaflet did not load (leaflet/ folder missing?)");
+if (typeof DATA === "undefined") throw new Error("data.js did not load");
+const COLORS = { consistent: "#2b6cb0", latent: "#dd6b20" };
+const nodeById = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
+const wMax = Math.max(...DATA.beh.map(b => b.w));
+
+const map = L.map("map", { preferCanvas: true });
+L.tileLayer("https://{s}.basemap.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO', maxZoom: 19
+}).addTo(map).once("tileerror", () => map.attributionControl.addAttribution("background map needs internet"));
+map.fitBounds(DATA.nodes.map(n => [n.lat, n.lon]), { padding: [20, 20] });
+
+const roadLayer = L.layerGroup().addTo(map);
+const behLayer = L.layerGroup().addTo(map);
+const nodeLayer = L.layerGroup().addTo(map);
+const ll = id => [nodeById[id].lat, nodeById[id].lon];
+
+const roadDir = new Set(DATA.road.map(r => r.s + ">" + r.t));
+// a road edge s>t follows the driving direction, so a leader downstream of its follower means the change travels against the traffic
+const dirOf = b => b.lag === 0 ? "0" : roadDir.has(b.t + ">" + b.s) && !roadDir.has(b.s + ">" + b.t) ? "against"
+  : roadDir.has(b.s + ">" + b.t) && !roadDir.has(b.t + ">" + b.s) ? "with" : "";
+for (const r of DATA.road) {
+  L.polyline([ll(r.s), ll(r.t)], { color: "#b8b8b8", weight: 1.5, opacity: 0.8, interactive: false }).addTo(roadLayer);
+}
+
+let selected = null;
+
+function visible(b) {
+  if (b.kind === "consistent" && !showCons.checked) return false;
+  if (b.kind === "latent" && !showLat.checked) return false;
+  if (b.w < wMax * wmin.value / 100) return false;
+  if (lag.value !== "any" && dirOf(b) !== lag.value) return false;
+  if (selected && selected.type === "node" && b.s !== selected.id && b.t !== selected.id) return false;
+  return true;
+}
+
+function draw() {
+  behLayer.clearLayers();
+  document.getElementById("wv").textContent = (wMax * wmin.value / 100).toFixed(4);
+  if (showRoad.checked) roadLayer.addTo(map); else map.removeLayer(roadLayer);
+  let n = 0;
+  for (const b of DATA.beh) {
+    if (!visible(b)) continue;
+    n++;
+    const line = L.polyline([ll(b.s), ll(b.t)], {
+      color: COLORS[b.kind] || "#555", weight: 1.5 + 5 * Math.sqrt(b.w / wMax), opacity: 0.75,
+      dashArray: b.lag === 0 ? "6 5" : null
+    }).addTo(behLayer);
+    line.on("click", ev => { L.DomEvent.stopPropagation(ev); showEdge(b); });
+    if (b.lag > 0) L.circleMarker(ll(b.s), { radius: 5, stroke: false, fillColor: COLORS[b.kind], fillOpacity: 1, interactive: false }).addTo(behLayer);
+    line.bindTooltip(`${b.s} → ${b.t} · ${b.kind} · ${b.episodes.length} episode(s)`, { sticky: true });
+  }
+  document.getElementById("stats").textContent =
+    `${DATA.nodes.length} sensors, ${DATA.meta.pairs} pairs, ${DATA.meta.episodes} episodes ` +
+    `(${DATA.meta.first_day} to ${DATA.meta.last_day}). Showing ${n}. Dashed: lag 0.`;
+}
+
+for (const n of DATA.nodes) {
+  const m = L.circleMarker([n.lat, n.lon], { radius: 4, color: "#333", weight: 1, fillColor: "#fff", fillOpacity: 1 }).addTo(nodeLayer);
+  m.bindTooltip("sensor " + n.id);
+  m.on("click", ev => { L.DomEvent.stopPropagation(ev); showNode(n.id); });
+}
+map.on("click", () => { selected = null; detail.innerHTML = '<span class="muted">Click an edge or a sensor.</span>'; draw(); });
+
+function jointTable(rows) {
+  return `<table><tr><th>leader</th><th>follower</th><th class="num">%</th><th class="num">× chance</th></tr>` +
+    rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="num">${(100 * r[2]).toFixed(1)}%</td>` +
+      `<td class="num" style="${r[3] >= 2 ? "font-weight:600" : ""}">${r[3].toFixed(2)}</td></tr>`).join("") + `</table>`;
+}
+
+function showEdge(b) {
+  selected = { type: "edge" };
+  const dir = b.lag === 0 ? `${b.s} — ${b.t} (simultaneous)` : `${b.s} leads ${b.t} by ${b.lag * 5} min` +
+    ({ against: " (against traffic)", with: " (with traffic)" }[dirOf(b)] || "");
+  let html = `<span class="tag" style="background:${COLORS[b.kind]}">${b.kind}</span>
+    <p><b>${dir}</b><br><span class="muted">w = ${b.w} · ${b.episodes.length} episode(s)</span></p>`;
+  b.episodes.forEach((e, i) => {
+    html += `<details ${i === 0 ? "open" : ""}><summary>${e.start} → ${e.end} (${e.hours} h)</summary>
+      <p class="muted">w = ${e.w}, p = ${e.p}</p>${jointTable(e.joint)}</details>`;
+  });
+  detail.innerHTML = html;
+}
+
+function showNode(id) {
+  selected = { type: "node", id };
+  const mine = DATA.beh.filter(b => b.s === id || b.t === id);
+  const lead = mine.filter(b => b.s === id && b.lag > 0).length;
+  const fol = mine.filter(b => b.t === id && b.lag > 0).length;
+  const lat = mine.filter(b => b.kind === "latent").length;
+  const roadDeg = DATA.road.filter(r => r.s === id || r.t === id).length;
+  detail.innerHTML = `<p><b>Sensor ${id}</b></p>
+    <table><tr><td>road edges</td><td class="num">${roadDeg}</td></tr>
+    <tr><td>dependent sensors</td><td class="num">${mine.length}</td></tr>
+    <tr><td>of which latent</td><td class="num">${lat}</td></tr>
+    <tr><td>leads (lag &gt; 0)</td><td class="num">${lead}</td></tr>
+    <tr><td>follows (lag &gt; 0)</td><td class="num">${fol}</td></tr></table>
+`;
+  draw();
+}
+
+for (const el of [showRoad, showCons, showLat, wmin, lag]) el.addEventListener("input", draw);
+draw();
+</script>
+</body>
+</html>
